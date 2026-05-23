@@ -8,7 +8,7 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -51,12 +51,13 @@ jobs:
           print('xray-config.json OK')
           "
           xray -config /tmp/xray-config.json > /tmp/xray.log 2>&1 &
-          for i in $(seq 1 15); do
+          for i in $(seq 1 20); do
             nc -z 127.0.0.1 1080 2>/dev/null && echo "Xray ready" && break
-            echo "Waiting $i/15..." && sleep 1
+            echo "Waiting $i/20..." && sleep 1
           done
-          PROXY_IP=$(curl -s --socks5 127.0.0.1:1080 --max-time 15 https://api.ipify.org || echo "failed")
+          PROXY_IP=$(curl -s --socks5 127.0.0.1:1080 --max-time 20 https://api.ipify.org || echo "failed")
           echo "Proxy IP: $PROXY_IP"
+          cat /tmp/xray.log || true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -78,10 +79,15 @@ jobs:
           TG_CHAT_ID:    ${{ secrets.TG_CHAT_ID }}
         run: node renew.mjs
 
-      - name: Upload error screenshot
-        if: failure()
+      - name: Upload screenshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: error-screenshot
-          path: error-screenshot.png
+          name: screenshots
+          path: |
+            debug-login.png
+            debug-server.png
+            debug-after-renew.png
+            error-screenshot.png
+          if-no-files-found: ignore
           retention-days: 7

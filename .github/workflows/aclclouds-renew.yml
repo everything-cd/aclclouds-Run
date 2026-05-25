@@ -16,10 +16,18 @@ jobs:
 
       - name: Install Xray
         run: |
-          XRAY_VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest \
-            | grep '"tag_name"' | head -1 | cut -d '"' -f 4)
-          echo "Xray version: $XRAY_VERSION"
+          # 写死稳定版本，避免 GitHub API 限流返回 302 导致版本号解析错误
+          XRAY_VERSION="v25.3.6"
+          echo "Installing Xray ${XRAY_VERSION}..."
           wget -q "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip" -O xray.zip
+          # 校验下载是否正常（正常的 zip 至少 5MB）
+          SIZE=$(stat -c%s xray.zip)
+          echo "Downloaded: ${SIZE} bytes"
+          if [ "$SIZE" -lt 1048576 ]; then
+            echo "ERROR: File too small, download likely failed:"
+            head -3 xray.zip
+            exit 1
+          fi
           unzip -q xray.zip -d xray-bin
           chmod +x xray-bin/xray
           sudo mv xray-bin/xray /usr/local/bin/xray

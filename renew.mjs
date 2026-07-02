@@ -48,14 +48,12 @@ function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// 从页面提取剩余时间文字（只看精确的时间容器，不读整个 body）
+// 从页面提取剩余时间文字
 async function findTimeText(page) {
   return await page.evaluate(() => {
     const keywords = ['Time remaining', 'Temps restant'];
-    // 只找直接包含关键词且子元素少的小容器
     const allEls = Array.from(document.querySelectorAll('p, span, div, h1, h2, h3, h4'));
     for (const el of allEls) {
-      // 跳过含大量子元素的容器（排除 body、大 div 等）
       if (el.children.length > 3) continue;
       const text = (el.textContent || '').trim();
       for (const kw of keywords) {
@@ -88,77 +86,59 @@ async function findTimeText(page) {
     const page = await ctx.newPage();
     page.setDefaultTimeout(60000);
 
-    // ── Step 1: 登录页 + CSRF ──
+    // ── Step 1: 登录页 ──
     console.log('[1] 打开登录页...');
     await page.goto(BASE_URL + '/auth/login', { waitUntil: 'networkidle', timeout: 60000 });
     await saveScreenshot(page, 'debug-login.png');
 
-    const csrfToken = await page.evaluate(() => {
-      const meta = document.querySelector('meta[name="csrf-token"]');
-      if (meta) return meta.getAttribute('content');
-      const input = document.querySelector('input[name="_token"]');
-      if (input) return input.value;
-      const match = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
-      if (match) return decodeURIComponent(match[1]);
-      return null;
-    });
-    console.log('[CSRF] token:', csrfToken ? csrfToken.slice(0, 20) + '...' : 'not found');
-    if (!csrfToken) throw new Error('无法获取 CSRF token');
-
-    // ── Step 2 & 3: 填邮箱密码 ──
+    // ── Step 2: 填邮箱密码 ──
     console.log('[2] 填写邮箱密码...');
-    await page.waitForSelector('#username', { timeout: 30000 });
-    await page.locator('#username').click();
+    await page.waitForSelector('input[type="email"], #username', { timeout: 30000 });
+    
+    const emailInput = page.locator('input[type="email"], #username').first();
+    await emailInput.click();
     await page.keyboard.type(EMAIL, { delay: randInt(50, 120) });
-    await page.locator('#password').click();
+    
+    const pwdInput = page.locator('input[type="password"], #password').first();
+    await pwdInput.click();
     await page.keyboard.type(PASSWORD, { delay: randInt(50, 120) });
 
-    // ── Step 4: 模拟鼠标 + captcha ──
-    console.log('[4] 模拟鼠标 + captcha...');
-    await page.mouse.move(400, 300);
-    await page.waitForTimeout(randInt(200, 400));
-    await page.mouse.move(320, 370, { steps: 8 });
-    await page.waitForTimeout(randInt(200, 400));
-    await page.mouse.move(320, 595, { steps: 12 });
-    await page.waitForTimeout(randInt(500, 1000));
+    // ── Step 3: 模拟 UI 操作处理 Captcha ──
+    console.log('[3] 尝试点击人机验证...');
+    const captchaBox = page.locator('text="I am not a robot"');
+    if (await captchaBox.count() > 0) {
+        // 模拟鼠标移动到验证码区域中心再点击
+        const box = await captchaBox.first().boundingBox();
+        if (box) {
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+            await page.waitForTimeout(randInt(200, 400));
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        } else {
+            await captchaBox.first().click();
+        }
+        console.log('[Captcha] 已点击，等待网页自动验证...');
+        // 等待网页内置 JS 运行并获取验证 Token
+        await page.waitForTimeout(randInt(3500, 5000)); 
+    } else {
+        console.log('[Captcha] 未找到验证码复选框，尝试直接登录');
+    }
 
-    const captchaResult = await page.evaluate(async (opts) => {
-      try {
-        const r = await fetch('/auth/captcha', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': opts.csrf, 'X-Requested-With': 'XMLHttpRequest' },
-          credentials: 'include',
-          body: JSON.stringify({ mouse_movements: opts.movements, mouse_distance: opts.distance, clicks: opts.clicks, key_presses: opts.keys, elapsed_ms: opts.elapsed }),
-        });
-        const ct = r.headers.get('content-type') || '';
-        if (!ct.includes('application/json')) return { error: 'not-json', status: r.status };
-        return await r.json();
-      } catch (e) { return { error: e.message }; }
-    }, { csrf: csrfToken, movements: randInt(25, 60), distance: randInt(400, 900), clicks: 1, keys: EMAIL.length + PASSWORD.length, elapsed: randInt(5000, 9000) });
+    // ── Step 4: 点击 Sign in 按钮 ──
+    console.log('[4] 点击登录...');
+    await page.locator('button:has-text("Sign in")').click();
 
-    console.log('[Captcha]', JSON.stringify(captchaResult));
-    if (captchaResult.error) throw new Error('captcha 异常: ' + JSON.stringify(captchaResult));
+    // 等待登录完成跳转
+    console.log('[5] 等待登录响应跳转...');
+    try {
+        await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
+    } catch (e) {
+        // 如果网络已空闲但没跳转，下方检查错误即可
+    }
 
-    // ── Step 5: 登录 ──
-    console.log('[5] POST /auth/login...');
-    const loginResult = await page.evaluate(async (opts) => {
-      try {
-        const r = await fetch('/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': opts.csrf, 'X-Requested-With': 'XMLHttpRequest' },
-          credentials: 'include',
-          body: JSON.stringify({ user: opts.email, password: opts.password, captcha_token: opts.token, captcha_answer: opts.answer }),
-        });
-        const ct = r.headers.get('content-type') || '';
-        const body = ct.includes('application/json') ? await r.json() : await r.text();
-        return { status: r.status, body };
-      } catch (e) { return { error: e.message }; }
-    }, { csrf: csrfToken, email: EMAIL, password: PASSWORD, token: captchaResult.token || '', answer: captchaResult.answer || '' });
-
-    console.log('[登录] status:', loginResult.status);
-    if (loginResult.error) throw new Error('登录异常: ' + loginResult.error);
-    if (loginResult.status !== 200 && loginResult.status !== 201) {
-      throw new Error('登录失败 ' + loginResult.status + ': ' + JSON.stringify(loginResult.body).slice(0, 150));
+    // 检查是否有报错提示
+    const pageText = await page.evaluate(() => document.body.innerText);
+    if (pageText.includes('Captcha incorrect') || pageText.includes('These credentials do not match')) {
+        throw new Error('登录失败: 验证码未通过或账号密码错误');
     }
 
     // ── 访问服务器页面 ──
@@ -202,13 +182,12 @@ async function findTimeText(page) {
       if (!btnText) throw new Error('未找到续期按钮');
       console.log('[续期] 点击:', btnText);
 
-      // 等待 "Renewing..." 状态消失，然后等新时间出现
+      // 等待 "Renewing..." 状态消失
       console.log('[续期] 等待续期完成...');
       let newRemainRaw = null;
       for (let i = 0; i < 40; i++) {
         await page.waitForTimeout(1000);
 
-        // 检查是否还在 "Renewing..." 状态
         const isRenewing = await page.evaluate(() => {
           return document.body.innerText.includes('Renewing');
         });
@@ -217,11 +196,9 @@ async function findTimeText(page) {
           continue;
         }
 
-        // Renewing 消失了，读取新时间
         const t = await findTimeText(page);
         if (t) {
           const h = parseHours(extractTimeStr(t));
-          // 新时间必须大于续期前时间，才说明续期真的生效了
           if (h > remainHours + 1) {
             newRemainRaw = t;
             console.log('[续期] 完成，耗时', i + 1, '秒');
@@ -233,7 +210,6 @@ async function findTimeText(page) {
       await saveScreenshot(page, 'debug-after-renew.png');
 
       if (!newRemainRaw) {
-        // 超时未检测到变化，直接重新加载页面获取最新时间
         console.log('[续期] 轮询超时，刷新页面读取最新时间...');
         await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
         await page.waitForTimeout(2000);

@@ -1,15 +1,172 @@
 import { chromium } from 'playwright';
+import fs from 'fs';
+import path from 'path';
 
-const EMAIL     = process.env.ACL_EMAIL;
-const PASSWORD  = process.env.ACL_PASSWORD;
-const SERVER_ID = process.env.ACL_SERVER_ID;
-const TG_TOKEN  = process.env.TG_BOT_TOKEN;
-const TG_CHAT   = process.env.TG_CHAT_ID;
-const PROXY_SRV = 'socks5://127.0.0.1:1080';
-const BASE_URL  = 'https://dash.aclclouds.com';
+// ---------- 环境变量 ----------
+const DISCORD_EMAIL    = process.env.DISCORD_EMAIL;    // Discord 邮箱
+const DISCORD_PASSWORD = process.env.DISCORD_PASSWORD; // Discord 密码
+const SERVER_ID        = process.env.ACL_SERVER_ID;
+const TG_TOKEN         = process.env.TG_BOT_TOKEN;
+const TG_CHAT          = process.env.TG_CHAT_ID;
+const PROXY_SRV        = 'socks5://127.0.0.1:1080';
+const BASE_URL         = 'https://aclclouds.com';      // 控制台主域名
 
 const RENEW_THRESHOLD_HOURS = 48;
+const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
+if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
+function log(...args) {
+    console.log(`[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}]`, ...args);
+}
+
+// 检查是否已到达控制台（非 /auth 路径）
+function isOnDashboard(page) {
+    try {
+        const url = new URL(page.url());
+        return url.hostname === 'aclclouds.com' && !url.pathname.startsWith('/auth');
+    } catch {
+        return false;
+    }
+}
+
+// ---------- Discord OAuth 登录 ----------
+async function performLogin(page, user) {
+    const LOGIN_URL = BASE_URL + '/auth/login';
+
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2000);
+    let filename = `01_login_page_${Date.now()}.png`;
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, filename), fullPage: true });
+    log(`✅ 截图完成: ${filename}`);
+
+    if (isOnDashboard(page)) {
+        log('✅ 已在控制台，无需重复登录');
+        return;
+    }
+
+    // 点击 Discord 登录按钮
+    const discordBtn = page.locator('a[href="/auth/oauth/discord"]').first();
+    await discordBtn.waitFor({ state: 'visible', timeout: 10000 });
+    log('🔄 点击 Discord 登录按钮...');
+    await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+        discordBtn.click()
+    ]);
+    await page.waitForTimeout(3000);
+
+    if (isOnDashboard(page)) {
+        log('✅ 已自动跳转到控制台');
+        return;
+    }
+
+    const currentUrl = page.url();
+    log(`当前页面: ${currentUrl}`);
+
+    // 情况一：跳转到 Discord 登录页
+    if (currentUrl.includes('discord.com/login')) {
+        log('🔐 进入 Discord 登录页，填写凭证...');
+        await page.waitForSelector('input[name="email"]', { timeout: 10000 });
+        await page.fill('input[name="email"]', user.username);
+        await page.fill('input[name="password"]', user.password);
+        await page.click('button[type="submit"]');
+        log('✅ 已提交 Discord 登录信息');
+
+        await page.waitForTimeout(5000);
+        if (page.url().includes('discord.com/login')) {
+            const errorEl = await page.$('[class*="errorMessage"]');
+            let errMsg = '未知错误';
+            if (errorEl) errMsg = await errorEl.innerText();
+            await page.screenshot({ path: path.join(SCREENSHOT_DIR, `discord_login_error_${Date.now()}.png`) });
+            throw new Error(`Discord 登录失败: ${errMsg}`);
+        }
+    }
+
+    // 情况二：OAuth 授权页
+    if (page.url().includes('discord.com/oauth2/authorize')) {
+        log('🔑 进入 Discord OAuth 授权页');
+        log(`  完整 URL: ${page.url()}`);
+        log(`  页面标题: ${await page.title()}`);
+
+        await page.waitForTimeout(2000);
+
+        // 检测内嵌登录表单
+        const emailInput = page.locator('input[name="email"]');
+        const isVisible = await emailInput.isVisible().catch(() => false);
+        if (isVisible) {
+            log('🔐 检测到内嵌登录表单，填写账号密码...');
+            await emailInput.fill(user.username);
+            await page.locator('input[name="password"]').fill(user.password);
+            await page.locator('button[type="submit"]').click();
+            log('✅ 已提交 Discord 登录信息');
+            await page.waitForTimeout(5000);
+
+            const errorEl = await page.$('[class*="errorMessage"]');
+            if (errorEl) {
+                const errMsg = await errorEl.innerText();
+                await page.screenshot({ path: path.join(SCREENSHOT_DIR, `discord_login_error_${Date.now()}.png`) });
+                throw new Error(`Discord 登录失败: ${errMsg}`);
+            }
+        } else {
+            log('  未检测到登录表单，可能已登录');
+        }
+
+        // 滚动到底部显示授权按钮
+        const scroller = page.locator('.body__8a031.auto_d125d2.scrollerBase_d125d2');
+        if (await scroller.count() > 0) {
+            await scroller.evaluate(el => el.scrollTop = el.scrollHeight);
+            await page.waitForTimeout(1000);
+        } else {
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await page.waitForTimeout(500);
+        }
+
+        // 点击授权按钮（中/英文）
+        const authorizeBtn = page.locator([
+            'button:has-text("授权")',
+            'button:has-text("Authorize")',
+            'button[class*="primary"]:has-text("授权")',
+            'button[class*="primary"]:has-text("Authorize")',
+            'div[role="button"]:has-text("授权")',
+            'div[role="button"]:has-text("Authorize")'
+        ].join(', ')).first();
+
+        try {
+            await authorizeBtn.scrollIntoViewIfNeeded();
+            await authorizeBtn.waitFor({ state: 'visible', timeout: 15000 });
+            await page.waitForTimeout(1000);
+            await Promise.all([
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+                authorizeBtn.click()
+            ]);
+            log('✅ 已点击授权按钮');
+        } catch (e) {
+            log('⚠️ 未找到授权按钮或点击失败，可能已自动授权，继续等待跳转...');
+        }
+    }
+
+    // 等待回到 aclclouds.com 控制台
+    if (!isOnDashboard(page)) {
+        log('⏳ 等待跳转至 ACLClouds 控制台...');
+        try {
+            await page.waitForURL(url => {
+                try {
+                    const u = new URL(url);
+                    return u.hostname === 'aclclouds.com' && !u.pathname.startsWith('/auth');
+                } catch { return false; }
+            }, { timeout: 30000 });
+        } catch {
+            throw new Error('登录流程后未回到 ACLClouds 控制台');
+        }
+    }
+
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    filename = `02_dashboard_loaded_${Date.now()}.png`;
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, filename), fullPage: true });
+    log(`✅ 截图完成: ${filename}`);
+    log('✅ Discord 登录成功，已进入 ACLClouds 控制台');
+}
+
+// ---------- 原有业务函数（不变） ----------
 async function tgNotify(msg) {
   if (!TG_TOKEN || !TG_CHAT) { console.log('[TG] 未配置，跳过'); return; }
   try {
@@ -31,7 +188,6 @@ function parseHours(text) {
   return days * 24 + hours + mins / 60;
 }
 
-// 新增中文转换函数
 function formatTimeChinese(raw) {
   if (!raw) return '未知';
   return raw
@@ -55,7 +211,7 @@ function extractTimeStr(raw) {
 
 async function saveScreenshot(page, name) {
   try {
-    await page.screenshot({ path: name, fullPage: true });
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, name), fullPage: true });
     console.log('[截图] 已保存:', name);
   } catch (e) { console.log('[截图] 失败:', e.message); }
 }
@@ -190,6 +346,7 @@ async function checkAndStartServer(page) {
   }
 }
 
+// ---------- 主流程 ----------
 (async () => {
   console.log('[代理]', PROXY_SRV);
   let browser;
@@ -210,52 +367,10 @@ async function checkAndStartServer(page) {
     const page = await ctx.newPage();
     page.setDefaultTimeout(60000);
 
-    console.log('[1] 打开登录页...');
-    await page.goto(BASE_URL + '/auth/login', { waitUntil: 'networkidle', timeout: 60000 });
-    await saveScreenshot(page, 'debug-login.png');
+    // ★ 使用 Discord 登录
+    await performLogin(page, { username: DISCORD_EMAIL, password: DISCORD_PASSWORD });
 
-    console.log('[2] 填写邮箱密码...');
-    await page.waitForSelector('input[type="email"], #username', { timeout: 30000 });
-
-    const emailInput = page.locator('input[type="email"], #username').first();
-    await emailInput.click();
-    await page.keyboard.type(EMAIL, { delay: randInt(50, 120) });
-
-    const pwdInput = page.locator('input[type="password"], #password').first();
-    await pwdInput.click();
-    await page.keyboard.type(PASSWORD, { delay: randInt(50, 120) });
-
-    console.log('[3] 尝试点击人机验证...');
-    const captchaBox = page.locator('text="I am not a robot"');
-    if (await captchaBox.count() > 0) {
-        const box = await captchaBox.first().boundingBox();
-        if (box) {
-            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
-            await page.waitForTimeout(randInt(200, 400));
-            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-        } else {
-            await captchaBox.first().click();
-        }
-        console.log('[Captcha] 已点击，等待网页自动验证...');
-        await page.waitForTimeout(randInt(3500, 5000));
-    } else {
-        console.log('[Captcha] 未找到验证码复选框，尝试直接登录');
-    }
-
-    console.log('[4] 点击登录...');
-    await page.locator('button:has-text("Sign in")').click();
-
-    console.log('[5] 等待登录响应跳转...');
-    try {
-        await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
-    } catch (e) {
-    }
-
-    const pageText = await page.evaluate(() => document.body.innerText);
-    if (pageText.includes('Captcha incorrect') || pageText.includes('These credentials do not match')) {
-        throw new Error('登录失败: 验证码未通过或账号密码错误');
-    }
-
+    // 跳转到指定服务器页面
     const serverUrl = BASE_URL + '/server/' + SERVER_ID;
     console.log('[->] 跳转到:', serverUrl);
     await page.goto(serverUrl, { waitUntil: 'networkidle', timeout: 60000 });
@@ -341,7 +456,7 @@ async function checkAndStartServer(page) {
       await tgNotify(
         'ACLClouds 续期成功\n\n' +
         '服务器: ' + SERVER_ID + '\n' +
-        '续期前: ' + formatTimeChinese(remainText) + '\n' +   // ← 这里改成中文
+        '续期前: ' + formatTimeChinese(remainText) + '\n' +
         '续期后: ' + newDays + ' 天 ' + newHrs + ' 小时\n\n' +
         '时间: ' + new Date().toISOString()
       );

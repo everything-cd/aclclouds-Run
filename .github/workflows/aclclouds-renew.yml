@@ -5,6 +5,10 @@ on:
     - cron: '0 18 */2 * *'     # 每2天 UTC 18:00 执行
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   renew:
     runs-on: ubuntu-latest
@@ -99,9 +103,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 获取所有运行 ID（按创建时间倒序）
           runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
-          # 保留前5条，删除其余的
           echo "$runs" | tail -n +6 | while read -r run_id; do
             echo "删除运行记录: $run_id"
             gh run delete "$run_id" || true

@@ -1,6 +1,6 @@
 # aclclouds-Run     
-ACL_EMAIL=   邮箱   
-ACL_PASSWORD=   密码   
+DISCORD_EMAIL= Discord 登录邮箱
+DISCORD_PASSWORD=	Discord 登录密码
 ACL_SERVER_ID=   服务器 ID   
 TG_BOT_TOKEN     
 TG_CHAT_ID

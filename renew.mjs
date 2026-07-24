@@ -166,7 +166,7 @@ async function performLogin(page, user) {
     log('✅ Discord 登录成功，已进入 ACLClouds 控制台');
 }
 
-// ---------- 原有业务函数（不变） ----------
+// ---------- 原有业务函数 ----------
 async function tgNotify(msg) {
   if (!TG_TOKEN || !TG_CHAT) { console.log('[TG] 未配置，跳过'); return; }
   try {
@@ -198,13 +198,15 @@ function formatTimeChinese(raw) {
 
 function extractTimeStr(raw) {
   const t = raw || '';
+  // 依次尝试匹配：天+小时+分钟、天+小时、小时+分钟、仅小时
+  // 去掉 \b 以允许 h 后面紧跟字母的情况（如 3hOffre）
   let m = t.match(/\d+\s*[jd]\s*\d+\s*h\s*\d+\s*min/i);
   if (m) return m[0];
-  m = t.match(/\d+\s*[jd]\s*\d+\s*h\b/i);
+  m = t.match(/\d+\s*[jd]\s*\d+\s*h/i);
   if (m) return m[0];
   m = t.match(/\d+\s*h\s*\d+\s*min/i);
   if (m) return m[0];
-  m = t.match(/\d+\s*h\b/i);
+  m = t.match(/\d+\s*h/i);
   if (m) return m[0];
   return '';
 }
